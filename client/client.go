@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"io"
 
 	"github.com/Jeffail/gabs/v2"
 	"golang.org/x/time/rate"
