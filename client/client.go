@@ -139,10 +139,50 @@ func (c *V2) Do(req *http.Request) (*http.Response, error) {
 				jitter = int(n.Int64()) + 1
 			}
 			time.Sleep(time.Duration(c.backoffTime+jitter) * time.Second)
-		} else {
-			// No indication of rate limit from server, we can proceed
-			break
-		}
+		} else if resp.StatusCode == http.StatusNotAcceptable {
+          			// --- START 406 CONDITIONAL RETRY LOGIC ---
+
+          			// A. Read the response body to check the error message.
+          			bodyBytes, readErr := io.ReadAll(resp.Body)
+          			// Ensure the body is closed/drained before retry
+          			resp.Body.Close()
+
+          			if readErr != nil {
+          				// Failed to read body, treat as unretryable 406
+          				return nil, fmt.Errorf("406 Not Acceptable: failed to read response body: %w", readErr)
+          			}
+
+          			bodyString := string(bodyBytes)
+
+          			// B. Check if the retry condition is met and if max retries are exceeded.
+          			if strings.Contains(bodyString, "Could not get a database lock") {
+          				fmt.Printf("Received 406 with 'Could not get a database lock' message (Attempt %d). Checking retry limits...\n", retryCount)
+
+          				if retryCount == c.maxRetries {
+          					maxRetriesExceeded = true
+          					// Return the 406 error with the specific message
+          					return nil, fmt.Errorf("406 Not Acceptable: max retries exceeded for 'database lock' error. Message: %s", bodyString)
+          				}
+
+          				// C. Wait and retry.
+          				waitTime := time.Duration(retryCount+1) * time.Second // Simple exponential backoff
+          				fmt.Printf("Retrying in %v...\n", waitTime)
+          				time.Sleep(waitTime)
+
+          				// D. Increment and continue
+          				retryCount++
+          				continue // Jump to the next iteration of the 'for' loop
+          			}
+
+          			// If 406 but the body *doesn't* contain "database lock",
+          			// treat it as a standard, unretryable 406 error.
+          			return nil, fmt.Errorf("406 Not Acceptable: Client configuration error. Message: %s", bodyString)
+
+          			// --- END 406 CONDITIONAL RETRY LOGIC ---
+          		} else {
+			        // No indication of rate limit from server, we can proceed
+			        break
+		        }
 	}
 	if maxRetriesExceeded {
 		return nil, fmt.Errorf("max retries exceeded for %v %v - Error: %v",
